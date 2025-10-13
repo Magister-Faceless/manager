@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { FileExplorer } from './components/FileExplorer'
 import { ChatInterface } from './components/ChatInterface'
 import { AgentManagement } from './components/AgentManagement'
@@ -27,6 +27,7 @@ export default function App() {
     showAgentPanel,
     toggleAgentPanel,
     openTabs,
+    loadAgentSettings,
   } = useStore()
 
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
@@ -34,6 +35,11 @@ export default function App() {
   const [selectedFolder, setSelectedFolder] = useState<FileSystemDirectoryHandle | null>(null)
   const [activeTab, setActiveTab] = useState<'chat' | 'editor'>('chat')
   const [error, setError] = useState('')
+
+  // Load agent settings on app startup
+  useEffect(() => {
+    loadAgentSettings()
+  }, [loadAgentSettings])
 
   const handleSelectFolder = async () => {
     try {

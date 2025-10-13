@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { fileSystemService } from '@/services/file-system'
+import { settingsPersistence, AgentSettings } from '@/services/settings-persistence'
 
 // Types
 export interface FileItem {
@@ -86,6 +87,10 @@ interface AppState {
   subAgents: [AgentConfig | null, AgentConfig | null, AgentConfig | null]
   updateOrchestrator: (config: Partial<AgentConfig>) => void
   updateSubAgent: (index: 0 | 1 | 2, config: Partial<AgentConfig>) => void
+  loadAgentSettings: () => Promise<void>
+  exportAgentSettings: () => Promise<string>
+  importAgentSettings: (jsonString: string) => Promise<void>
+  clearAgentSettings: () => Promise<void>
 
   // UI State
   showAgentPanel: boolean
@@ -661,12 +666,13 @@ export const useStore = create<AppState>((set, get) => ({
     }))
   },
 
-  // Agents (unchanged)
+  // Agents
   orchestrator: null,
   subAgents: [null, null, null],
+  
   updateOrchestrator: (config) => {
-    set((state) => ({
-      orchestrator: state.orchestrator
+    set((state) => {
+      const updatedOrchestrator = state.orchestrator
         ? { ...state.orchestrator, ...config }
         : {
             id: 'orchestrator',
@@ -676,9 +682,19 @@ export const useStore = create<AppState>((set, get) => ({
             model: '',
             systemPrompt: '',
             ...config,
-          },
-    }))
+          }
+      
+      // Persist to storage
+      settingsPersistence.saveSettings({
+        orchestrator: updatedOrchestrator as AgentSettings,
+      }).catch(error => {
+        console.error('Failed to persist orchestrator settings:', error)
+      })
+      
+      return { orchestrator: updatedOrchestrator }
+    })
   },
+  
   updateSubAgent: (index, config) => {
     set((state) => {
       const newSubAgents = [...state.subAgents] as [
@@ -697,8 +713,61 @@ export const useStore = create<AppState>((set, get) => ({
             systemPrompt: '',
             ...config,
           }
+      
+      // Persist to storage
+      settingsPersistence.saveSettings({
+        subAgents: newSubAgents as [AgentSettings | null, AgentSettings | null, AgentSettings | null],
+      }).catch(error => {
+        console.error('Failed to persist sub-agent settings:', error)
+      })
+      
       return { subAgents: newSubAgents }
     })
+  },
+  
+  loadAgentSettings: async () => {
+    try {
+      const settings = await settingsPersistence.loadSettings()
+      set({
+        orchestrator: settings.orchestrator,
+        subAgents: settings.subAgents,
+      })
+    } catch (error) {
+      console.error('Failed to load agent settings:', error)
+    }
+  },
+  
+  exportAgentSettings: async () => {
+    try {
+      return await settingsPersistence.exportSettings()
+    } catch (error) {
+      console.error('Failed to export settings:', error)
+      throw error
+    }
+  },
+  
+  importAgentSettings: async (jsonString: string) => {
+    try {
+      await settingsPersistence.importSettings(jsonString)
+      // Reload settings after import
+      await get().loadAgentSettings()
+    } catch (error) {
+      console.error('Failed to import settings:', error)
+      throw error
+    }
+  },
+  
+  clearAgentSettings: async () => {
+    try {
+      await settingsPersistence.clearSettings()
+      set({
+        orchestrator: null,
+        subAgents: [null, null, null],
+      })
+    } catch (error) {
+      console.error('Failed to clear settings:', error)
+      throw error
+    }
   },
 
   // UI State (unchanged)
