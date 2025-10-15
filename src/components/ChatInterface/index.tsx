@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, MessageSquare, Plus, Trash2, MoreVertical, Loader2 } from 'lucide-react'
+import { Send, MessageSquare, Plus, Trash2, MoreVertical, Loader2, Pencil } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -13,6 +13,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { StreamingMessage } from './StreamingMessage'
 
 export function ChatInterface() {
   const {
@@ -22,13 +23,28 @@ export function ChatInterface() {
     selectChatSession,
     addMessage,
     deleteChatSession,
+    renameChatSession,
     orchestrator,
+    subAgents,
+    currentProject,
   } = useStore()
   
   const [input, setInput] = useState('')
-  const [showSessions, setShowSessions] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
+  const [editThreadName, setEditThreadName] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  
+  // Streaming state
+  const [streamingContent, setStreamingContent] = useState('')
+  const [streamingTools, setStreamingTools] = useState<Array<{
+    step: number
+    toolName: string
+    input: any
+    output?: any
+    status: 'running' | 'success' | 'error'
+  }>>([])
+  const [isStreaming, setIsStreaming] = useState(false)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -36,28 +52,37 @@ export function ChatInterface() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [currentSession?.messages])
+  }, [currentSession?.messages, streamingContent, streamingTools])
 
   const handleSend = async () => {
     if (!input.trim() || isLoading) return
 
+    // Check if project is selected
+    if (!currentProject) {
+      alert('Please select a project first!')
+      return
+    }
+
     // Check if orchestrator is configured
     if (!orchestrator || !orchestrator.provider || !orchestrator.model) {
-      alert('Please configure the Orchestrator agent first!\n\nClick the "Show Agents" button in the top right to set up your agent.')
+      alert('Please configure the Orchestrator agent first!\n\nClick the "Settings" button to set up your agent.')
       return
     }
 
     if (!orchestrator.apiKey) {
-      alert('Please add your OpenRouter API key in Agent Management!')
+      alert('Please add your API key in AI Settings!')
       return
     }
 
     const userMessage = input.trim()
     setInput('')
     setIsLoading(true)
+    setIsStreaming(true)
+    setStreamingContent('')
+    setStreamingTools([])
 
     // Add user message to chat
-    addMessage({ role: 'user', content: userMessage })
+    await addMessage({ role: 'user', content: userMessage })
 
     try {
       // Prepare conversation history
@@ -70,58 +95,91 @@ export function ChatInterface() {
       // Add current message
       messages.push({ role: 'user', content: userMessage })
 
-      // Execute agent with streaming
-      const result = await agentService.executeWithStreaming(orchestrator, messages)
+      // Execute agent with streaming, passing subAgents for dynamic tool generation
+      const result = await agentService.executeWithStreaming(orchestrator, messages, subAgents)
 
-      // Stream the response
+      // Stream the response with real-time updates
       let fullResponse = ''
-      let toolExecutionLog: string[] = []
       let currentStep = 0
+      const toolsMap = new Map<number, any>()
 
       for await (const chunk of result.fullStream) {
         switch (chunk.type) {
           case 'tool-call':
             currentStep++
             console.log('🔧 Tool called:', chunk.toolName, 'with input:', chunk.input)
-            const argsStr = JSON.stringify(chunk.input, null, 2)
-            toolExecutionLog.push(`\n**🔧 Step ${currentStep} - Tool: ${chunk.toolName}**\n\`\`\`json\n${argsStr}\n\`\`\``)
+            
+            const newTool = {
+              step: currentStep,
+              toolName: chunk.toolName,
+              input: chunk.input,
+              status: 'running' as const
+            }
+            toolsMap.set(currentStep, newTool)
+            setStreamingTools(Array.from(toolsMap.values()))
             break
             
           case 'tool-result':
             console.log('✅ Tool result:', chunk.toolName, chunk.output)
-            const resultStr = typeof chunk.output === 'string' 
-              ? chunk.output 
-              : JSON.stringify(chunk.output, null, 2)
-            toolExecutionLog.push(`\n**✅ Result:**\n\`\`\`json\n${resultStr}\n\`\`\``)
+            
+            // Find the corresponding tool call and update it
+            for (const [step, tool] of toolsMap.entries()) {
+              if (tool.toolName === chunk.toolName && !tool.output) {
+                tool.output = chunk.output
+                tool.status = 'success'
+                toolsMap.set(step, tool)
+                setStreamingTools(Array.from(toolsMap.values()))
+                break
+              }
+            }
             break
             
           case 'text-delta':
             fullResponse += chunk.text
+            setStreamingContent(fullResponse)
             break
         }
       }
+
+      // Finalize streaming
+      setIsStreaming(false)
 
       // Add assistant response to chat
       let finalContent = ''
       
       // Add tool execution details if any
-      if (toolExecutionLog.length > 0) {
-        finalContent += '### Tool Executions\n' + toolExecutionLog.join('\n\n') + '\n\n---\n\n'
+      if (toolsMap.size > 0) {
+        finalContent += '### Tool Executions\n'
+        Array.from(toolsMap.values()).forEach(tool => {
+          finalContent += `\n**🔧 Step ${tool.step} - Tool: ${tool.toolName}**\n`
+          finalContent += `\`\`\`json\n${JSON.stringify(tool.input, null, 2)}\n\`\`\`\n`
+          if (tool.output) {
+            const outputStr = typeof tool.output === 'string' 
+              ? tool.output 
+              : JSON.stringify(tool.output, null, 2)
+            finalContent += `\n**✅ Result:**\n\`\`\`json\n${outputStr}\n\`\`\`\n`
+          }
+        })
+        finalContent += '\n---\n\n'
       }
       
       // Add the AI's text response
       if (fullResponse) {
         finalContent += fullResponse
-      } else if (toolExecutionLog.length > 0) {
+      } else if (toolsMap.size > 0) {
         finalContent += '_Task completed successfully._'
       } else {
         finalContent = 'Task completed.'
       }
 
-      addMessage({ 
+      await addMessage({ 
         role: 'assistant', 
         content: finalContent
       })
+      
+      // Clear streaming state
+      setStreamingContent('')
+      setStreamingTools([])
 
     } catch (error) {
       console.error('Error executing agent:', error)
@@ -138,10 +196,15 @@ export function ChatInterface() {
         }
       }
       
-      addMessage({
+      await addMessage({
         role: 'assistant',
         content: errorMessage
       })
+      
+      // Clear streaming state on error
+      setIsStreaming(false)
+      setStreamingContent('')
+      setStreamingTools([])
     } finally {
       setIsLoading(false)
     }
@@ -154,101 +217,161 @@ export function ChatInterface() {
     }
   }
 
+  const handleRenameThread = async (threadId: string) => {
+    if (editThreadName.trim()) {
+      try {
+        await renameChatSession(threadId, editThreadName.trim())
+        setEditingThreadId(null)
+        setEditThreadName('')
+      } catch (error) {
+        console.error('Failed to rename thread:', error)
+        alert('Failed to rename thread. Please try again.')
+      }
+    }
+  }
+
+  const handleCreateThread = async () => {
+    if (!currentProject) {
+      alert('Please select a project first!')
+      return
+    }
+    try {
+      await createChatSession()
+    } catch (error) {
+      console.error('Failed to create thread:', error)
+      alert('Failed to create chat thread. Please try again.')
+    }
+  }
+
   return (
-    <div className="flex h-full">
-      {/* Chat Sessions Sidebar */}
-      <div
-        className={`border-r transition-all duration-200 ${
-          showSessions ? 'w-64' : 'w-0'
-        } overflow-hidden`}
-      >
-        <div className="p-4 border-b flex items-center justify-between">
-          <h3 className="font-semibold text-sm">Chat History</h3>
+    <div className="flex flex-col h-full">
+      {/* Thread Selector */}
+      <div className="border-b p-3">
+        <div className="flex items-center gap-2 mb-2">
+          <select
+            className="flex-1 px-3 py-2 text-sm border rounded-md bg-background"
+            value={currentSession?.id || ''}
+            onChange={(e) => e.target.value && selectChatSession(e.target.value)}
+          >
+            <option value="">Select a chat thread...</option>
+            {chatSessions.map((session) => (
+              <option key={session.id} value={session.id}>
+                {session.name} ({session.messages.length} messages)
+              </option>
+            ))}
+          </select>
           <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={createChatSession}
+            variant="outline"
+            size="sm"
+            onClick={handleCreateThread}
+            disabled={!currentProject}
           >
             <Plus className="h-4 w-4" />
           </Button>
         </div>
-        <ScrollArea className="h-[calc(100%-60px)]">
-          <div className="p-2 space-y-1">
-            {chatSessions.map((session) => (
-              <div
-                key={session.id}
-                className={`flex items-center gap-2 p-2 rounded cursor-pointer hover:bg-accent group ${
-                  currentSession?.id === session.id ? 'bg-accent' : ''
-                }`}
-                onClick={() => selectChatSession(session.id)}
-              >
-                <MessageSquare className="h-4 w-4 flex-shrink-0" />
-                <span className="text-sm flex-1 truncate">{session.name}</span>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 opacity-0 group-hover:opacity-100"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <MoreVertical className="h-3 w-3" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        deleteChatSession(session.id)
+        
+        {/* Thread Management */}
+        {chatSessions.length > 0 && (
+          <ScrollArea className="max-h-32">
+            <div className="space-y-1">
+              {chatSessions.map((session) => (
+                <div
+                  key={session.id}
+                  className={`flex items-center gap-2 p-2 rounded text-sm hover:bg-accent group ${
+                    currentSession?.id === session.id ? 'bg-accent' : ''
+                  }`}
+                >
+                  <MessageSquare className="h-3 w-3 flex-shrink-0" />
+                  
+                  {editingThreadId === session.id ? (
+                    <Input
+                      value={editThreadName}
+                      onChange={(e) => setEditThreadName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRenameThread(session.id)
+                        if (e.key === 'Escape') setEditingThreadId(null)
                       }}
-                      className="text-destructive"
+                      onBlur={() => handleRenameThread(session.id)}
+                      className="h-6 text-xs flex-1"
+                      autoFocus
+                    />
+                  ) : (
+                    <span
+                      className="flex-1 truncate cursor-pointer"
+                      onClick={() => selectChatSession(session.id)}
                     >
-                      <Trash2 className="h-4 w-4 mr-2" />
-                      Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            ))}
-          </div>
-        </ScrollArea>
+                      {session.name}
+                    </span>
+                  )}
+                  
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-5 w-5 opacity-0 group-hover:opacity-100"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreVertical className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setEditingThreadId(session.id)
+                          setEditThreadName(session.name)
+                        }}
+                      >
+                        <Pencil className="h-3 w-3 mr-2" />
+                        Rename
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={async (e) => {
+                          e.stopPropagation()
+                          if (confirm('Delete this chat thread?')) {
+                            try {
+                              await deleteChatSession(session.id)
+                            } catch (error) {
+                              console.error('Failed to delete:', error)
+                              alert('Failed to delete thread.')
+                            }
+                          }
+                        }}
+                        className="text-destructive"
+                      >
+                        <Trash2 className="h-3 w-3 mr-2" />
+                        Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
       </div>
 
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
-        {/* Header */}
-        <div className="border-b p-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => setShowSessions(!showSessions)}
-            >
-              <MessageSquare className="h-4 w-4" />
-            </Button>
-            <h2 className="font-semibold">
-              {currentSession?.name || 'No Active Chat'}
-            </h2>
-          </div>
-          {!currentSession && (
-            <Button onClick={createChatSession} size="sm">
-              <Plus className="h-4 w-4 mr-2" />
-              New Chat
-            </Button>
-          )}
-        </div>
+      {/* Chat Area */}
+      <div className="flex-1 flex flex-col min-h-0">
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4" style={{ maxHeight: 'calc(100vh - 200px)' }}>
-          {!currentSession ? (
+        <ScrollArea className="flex-1 p-4">
+          {!currentProject ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground">
+              <div className="text-center">
+                <MessageSquare className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p className="text-lg font-medium mb-2">No project selected</p>
+                <p className="text-sm">Select a project to start chatting</p>
+              </div>
+            </div>
+          ) : !currentSession ? (
             <div className="flex items-center justify-center h-full text-muted-foreground">
               <div className="text-center">
                 <MessageSquare className="h-12 w-12 mx-auto mb-4 opacity-50" />
                 <p className="text-lg font-medium mb-2">No chat selected</p>
                 <p className="text-sm mb-4">Create a new chat to get started</p>
-                <Button onClick={createChatSession}>
+                <Button onClick={handleCreateThread}>
                   <Plus className="h-4 w-4 mr-2" />
                   New Chat
                 </Button>
@@ -263,7 +386,7 @@ export function ChatInterface() {
               </div>
             </div>
           ) : (
-            <div className="space-y-4 max-w-4xl mx-auto">
+            <div className="space-y-4">
               {currentSession.messages.map((message) => (
                 <div
                   key={message.id}
@@ -271,17 +394,16 @@ export function ChatInterface() {
                     message.role === 'user' ? 'justify-end' : 'justify-start'
                   }`}
                 >
-                  <div
-                    className={`rounded-lg px-4 py-3 max-w-[80%] ${
-                      message.role === 'user'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-secondary text-secondary-foreground'
-                    }`}
-                  >
-                    <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
-                      {message.role === 'user' ? (
-                        <div className="whitespace-pre-wrap">{message.content}</div>
-                      ) : (
+                  {message.role === 'user' ? (
+                    <div className="rounded-lg px-4 py-3 max-w-[80%] bg-primary text-primary-foreground break-words">
+                      <div className="text-sm whitespace-pre-wrap break-words">{message.content}</div>
+                      <div className="text-xs opacity-70 mt-1">
+                        {new Date(message.timestamp).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg px-4 py-3 max-w-[80%] bg-secondary text-secondary-foreground break-words overflow-hidden">
+                      <div className="text-sm prose prose-sm dark:prose-invert max-w-none break-words">
                         <ReactMarkdown
                           components={{
                             code: ({ className, children, ...props }) => {
@@ -300,23 +422,34 @@ export function ChatInterface() {
                         >
                           {message.content}
                         </ReactMarkdown>
-                      )}
+                      </div>
+                      <div className="text-xs opacity-70 mt-1">
+                        {new Date(message.timestamp).toLocaleTimeString()}
+                      </div>
                     </div>
-                    <div className="text-xs opacity-70 mt-1">
-                      {new Date(message.timestamp).toLocaleTimeString()}
-                    </div>
-                  </div>
+                  )}
                 </div>
               ))}
+              
+              {/* Show streaming message */}
+              {isStreaming && (
+                <StreamingMessage
+                  content={streamingContent}
+                  toolExecutions={streamingTools}
+                  isStreaming={true}
+                  timestamp={Date.now()}
+                />
+              )}
+              
               <div ref={messagesEndRef} />
             </div>
           )}
-        </div>
+        </ScrollArea>
 
         {/* Input */}
-        {currentSession && (
-          <div className="border-t p-4">
-            <div className="flex gap-2 max-w-4xl mx-auto">
+        {currentSession && currentProject && (
+          <div className="border-t p-3">
+            <div className="flex gap-2">
               <Input
                 placeholder="Type your message..."
                 value={input}

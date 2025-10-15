@@ -1,21 +1,32 @@
 import { streamText, generateText, CoreMessage, stepCountIs } from 'ai'
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
-import tools from './tools'
+import { buildToolSet, getDefaultTools } from './tools'
 import { AgentConfig } from '@/store'
 import ORCHESTRATOR_SYSTEM_PROMPT from './orchestrator-prompt'
+import { generateToolsFromAgents } from './agent-tool-wrapper'
 
 export class AgentService {
   /**
-   * Get the OpenRouter provider instance
+   * Get the provider instance based on configuration
    */
   private getProvider(config: AgentConfig) {
     if (!config.apiKey) {
-      throw new Error('API key is required for OpenRouter')
+      throw new Error(`API key is required for ${config.provider}`)
     }
     
-    return createOpenRouter({
-      apiKey: config.apiKey,
-    })
+    switch (config.provider) {
+      case 'openrouter':
+        return createOpenRouter({
+          apiKey: config.apiKey,
+        })
+      case 'perplexity':
+        return createOpenRouter({
+          apiKey: config.apiKey,
+          baseURL: 'https://api.perplexity.ai',
+        })
+      default:
+        throw new Error(`Unsupported provider: ${config.provider}`)
+    }
   }
 
   /**
@@ -28,10 +39,12 @@ export class AgentService {
 
   /**
    * Execute agent with streaming (for chat interface)
+   * Supports dynamic tool generation from subagents
    */
   async executeWithStreaming(
     config: AgentConfig,
     messages: CoreMessage[],
+    subAgents: AgentConfig[] = [],
     maxSteps: number = 20
   ) {
     if (!config.provider || !config.model) {
@@ -39,7 +52,7 @@ export class AgentService {
     }
 
     if (!config.apiKey) {
-      throw new Error('API key is required. Please add your OpenRouter API key in Agent Management.')
+      throw new Error(`API key is required. Please add your ${config.provider} API key in Agent Management.`)
     }
 
     const model = this.getModel(config)
@@ -53,11 +66,22 @@ export class AgentService {
       content: systemPrompt
     }
     
+    // Generate tools from subagents if this is the orchestrator
+    const agentTools = isOrchestrator && subAgents.length > 0 
+      ? generateToolsFromAgents(subAgents)
+      : {}
+    
+    // Build tool set from agent's selected tools
+    const selectedToolIds = config.selectedTools || getDefaultTools()
+    const allTools = buildToolSet(selectedToolIds, agentTools)
+    
     try {
       const result = await streamText({
         model,
         messages: [systemMessage, ...messages],
-        tools,
+        tools: allTools,
+        temperature: config.temperature,
+        maxOutputTokens: config.maxTokens,
         stopWhen: stepCountIs(maxSteps), // Allow multiple tool execution steps
         onStepFinish: ({ text, toolCalls, toolResults, finishReason, usage }) => {
           console.log('Step finished:', {
@@ -103,6 +127,10 @@ export class AgentService {
       role: 'system',
       content: systemPrompt
     }
+    
+    // Build tool set from agent's selected tools
+    const selectedToolIds = config.selectedTools || getDefaultTools()
+    const tools = buildToolSet(selectedToolIds)
     
     try {
       const result = await generateText({

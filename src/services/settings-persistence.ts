@@ -15,12 +15,16 @@ export interface AgentSettings {
   apiKey: string
   model: string
   systemPrompt: string
+  description: string
+  temperature?: number
+  maxTokens?: number
+  selectedTools?: string[] // Optional for backwards compatibility with saved settings
 }
 
 export interface AppSettings {
   version: string
   orchestrator: AgentSettings | null
-  subAgents: [AgentSettings | null, AgentSettings | null, AgentSettings | null]
+  subAgents: AgentSettings[] // Dynamic array
   lastUpdated: number
 }
 
@@ -219,7 +223,7 @@ class SettingsPersistenceService {
     return {
       version: SETTINGS_VERSION,
       orchestrator: null,
-      subAgents: [null, null, null],
+      subAgents: [],
       lastUpdated: Date.now(),
     }
   }
@@ -230,7 +234,7 @@ class SettingsPersistenceService {
   private validateSettings(settings: any): settings is AppSettings {
     if (!settings || typeof settings !== 'object') return false
     if (!settings.version || typeof settings.version !== 'string') return false
-    if (!Array.isArray(settings.subAgents) || settings.subAgents.length !== 3) return false
+    if (!Array.isArray(settings.subAgents)) return false
     return true
   }
 

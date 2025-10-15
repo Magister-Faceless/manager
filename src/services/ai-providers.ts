@@ -174,6 +174,25 @@ const zaiProvider: AIProvider = {
   },
 }
 
+// Perplexity Provider
+const perplexityProvider: AIProvider = {
+  id: 'perplexity',
+  name: 'Perplexity',
+  requiresApiKey: true,
+  getModels: async (apiKey) => {
+    if (!apiKey) throw new Error('API key required for Perplexity')
+    
+    // Perplexity models
+    return [
+      { id: 'llama-3.1-sonar-small-128k-online', name: 'Sonar Small Online', description: 'Fast online model with web search' },
+      { id: 'llama-3.1-sonar-large-128k-online', name: 'Sonar Large Online', description: 'Powerful online model with web search' },
+      { id: 'llama-3.1-sonar-huge-128k-online', name: 'Sonar Huge Online', description: 'Most capable online model with web search' },
+      { id: 'llama-3.1-sonar-small-128k-chat', name: 'Sonar Small Chat', description: 'Fast chat model' },
+      { id: 'llama-3.1-sonar-large-128k-chat', name: 'Sonar Large Chat', description: 'Powerful chat model' },
+    ]
+  },
+}
+
 // Ollama Provider (Local)
 const ollamaProvider: AIProvider = {
   id: 'ollama',
@@ -200,9 +219,10 @@ const ollamaProvider: AIProvider = {
 }
 
 export const AI_PROVIDERS: Record<string, AIProvider> = {
+  openrouter: openrouterProvider,
+  perplexity: perplexityProvider,
   openai: openaiProvider,
   anthropic: anthropicProvider,
-  openrouter: openrouterProvider,
   xai: xaiProvider,
   deepseek: deepseekProvider,
   qwen: qwenProvider,

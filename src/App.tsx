@@ -1,7 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { FileExplorer } from './components/FileExplorer'
-import { ChatInterface } from './components/ChatInterface'
-import { AgentManagement } from './components/AgentManagement'
+import { RightPanel } from './components/RightPanel'
 import { TabEditor } from './components/TabEditor'
 import { useStore } from './store'
 import { Button } from './components/ui/button'
@@ -14,8 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from './components/ui/select'
-import { FolderOpen, Plus, Bot, FileText, MessageSquare, AlertCircle } from 'lucide-react'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
+import { FolderOpen, Plus, AlertCircle, GripVertical } from 'lucide-react'
 import { fileSystemService, FileSystemService } from './services/file-system'
 
 export default function App() {
@@ -24,8 +22,6 @@ export default function App() {
     currentProject,
     addProject,
     selectProject,
-    showAgentPanel,
-    toggleAgentPanel,
     openTabs,
     loadAgentSettings,
   } = useStore()
@@ -33,13 +29,97 @@ export default function App() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [selectedFolder, setSelectedFolder] = useState<FileSystemDirectoryHandle | null>(null)
-  const [activeTab, setActiveTab] = useState<'chat' | 'editor'>('chat')
   const [error, setError] = useState('')
+  
+  // File Explorer resize state
+  const [fileExplorerWidth, setFileExplorerWidth] = useState(256) // Default w-64 = 256px
+  const [isResizingLeft, setIsResizingLeft] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  
+  // Right Panel resize state
+  const [rightPanelWidth, setRightPanelWidth] = useState(384) // Default w-96 = 384px
+  const [isResizingRight, setIsResizingRight] = useState(false)
 
   // Load agent settings on app startup
   useEffect(() => {
     loadAgentSettings()
   }, [loadAgentSettings])
+
+  // Handle file explorer resize
+  const handleMouseDownLeft = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizingLeft(true)
+  }
+  
+  // Handle right panel resize
+  const handleMouseDownRight = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizingRight(true)
+  }
+
+  // Handle left resize (file explorer)
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizingLeft || !containerRef.current) return
+      
+      const containerRect = containerRef.current.getBoundingClientRect()
+      const newWidth = e.clientX - containerRect.left
+      
+      // Constrain width between 200px and 500px
+      const constrainedWidth = Math.min(Math.max(newWidth, 200), 500)
+      setFileExplorerWidth(constrainedWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizingLeft(false)
+    }
+
+    if (isResizingLeft) {
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizingLeft])
+  
+  // Handle right resize (right panel)
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizingRight || !containerRef.current) return
+      
+      const containerRect = containerRef.current.getBoundingClientRect()
+      const newWidth = containerRect.right - e.clientX
+      
+      // Constrain width between 300px and 800px
+      const constrainedWidth = Math.min(Math.max(newWidth, 300), 800)
+      setRightPanelWidth(constrainedWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizingRight(false)
+    }
+
+    if (isResizingRight) {
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizingRight])
 
   const handleSelectFolder = async () => {
     try {
@@ -110,53 +190,47 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant={showAgentPanel ? 'default' : 'outline'}
-            size="sm"
-            onClick={toggleAgentPanel}
-          >
-            <Bot className="h-4 w-4 mr-1" />
-            {showAgentPanel ? 'Hide' : 'Show'} Agents
-          </Button>
-        </div>
       </div>
 
-      {/* Main Content */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* File Explorer Sidebar */}
-        <div className="w-64 border-r">
+      {/* Main Content - 3 Column Layout */}
+      <div ref={containerRef} className="flex flex-1 overflow-hidden">
+        {/* Left Column: File Explorer */}
+        <div 
+          className="border-r flex-shrink-0" 
+          style={{ width: `${fileExplorerWidth}px` }}
+        >
           <FileExplorer />
         </div>
 
-        {/* Center Content Area */}
-        <div className="flex-1 flex flex-col">
+        {/* Left Resize Handle */}
+        <div
+          onMouseDown={handleMouseDownLeft}
+          className={`w-1 hover:w-2 bg-transparent hover:bg-primary/20 cursor-col-resize transition-all flex items-center justify-center group ${
+            isResizingLeft ? 'bg-primary/30 w-2' : ''
+          }`}
+          style={{ flexShrink: 0 }}
+        >
+          <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+            <GripVertical className="h-4 w-4 text-muted-foreground" />
+          </div>
+        </div>
+
+        {/* Middle Column: File Editor with Tabs */}
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {currentProject ? (
-            <Tabs value={activeTab} onValueChange={(v: string) => setActiveTab(v as 'chat' | 'editor')} className="flex-1 flex flex-col">
-              <div className="border-b px-4">
-                <TabsList className="h-10">
-                  <TabsTrigger value="chat" className="gap-2">
-                    <MessageSquare className="h-4 w-4" />
-                    Chat
-                  </TabsTrigger>
-                  <TabsTrigger value="editor" className="gap-2">
-                    <FileText className="h-4 w-4" />
-                    Editor
-                    {openTabs.length > 0 && (
-                      <span className="text-xs text-muted-foreground">({openTabs.length})</span>
-                    )}
-                  </TabsTrigger>
-                </TabsList>
+            openTabs.length > 0 ? (
+              <TabEditor />
+            ) : (
+              <div className="flex items-center justify-center h-full text-muted-foreground">
+                <div className="text-center max-w-md">
+                  <FolderOpen className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                  <h2 className="text-xl font-bold mb-2">No Files Open</h2>
+                  <p className="text-sm">
+                    Click on a file in the explorer to open it in the editor.
+                  </p>
+                </div>
               </div>
-              
-              <TabsContent value="chat" className="flex-1 m-0">
-                <ChatInterface />
-              </TabsContent>
-              
-              <TabsContent value="editor" className="flex-1 m-0 h-full">
-                <TabEditor />
-              </TabsContent>
-            </Tabs>
+            )
           ) : (
             <div className="flex items-center justify-center h-full text-muted-foreground">
               <div className="text-center max-w-md">
@@ -174,12 +248,26 @@ export default function App() {
           )}
         </div>
 
-        {/* Agent Management Panel */}
-        {showAgentPanel && (
-          <div className="w-96 border-l">
-            <AgentManagement />
+        {/* Right Resize Handle */}
+        <div
+          onMouseDown={handleMouseDownRight}
+          className={`w-1 hover:w-2 bg-transparent hover:bg-primary/20 cursor-col-resize transition-all flex items-center justify-center group ${
+            isResizingRight ? 'bg-primary/30 w-2' : ''
+          }`}
+          style={{ flexShrink: 0 }}
+        >
+          <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+            <GripVertical className="h-4 w-4 text-muted-foreground" />
           </div>
-        )}
+        </div>
+        
+        {/* Right Column: AI Chat & Settings */}
+        <div 
+          className="right-panel-container h-full min-h-0 border-l flex-shrink-0"
+          style={{ width: `${rightPanelWidth}px` }}
+        >
+          <RightPanel />
+        </div>
       </div>
 
       {/* New Project Dialog */}

@@ -1,6 +1,9 @@
 import { create } from 'zustand'
 import { fileSystemService } from '@/services/file-system'
-import { settingsPersistence, AgentSettings } from '@/services/settings-persistence'
+import { settingsPersistence } from '@/services/settings-persistence'
+import { chatPersistence, ChatThread } from '@/services/chat-persistence'
+import { contextManager } from '@/services/context-manager'
+import { getDefaultTools } from '@/services/tools'
 
 // Types
 export interface FileItem {
@@ -40,6 +43,8 @@ export interface ChatSession {
   updatedAt: number
 }
 
+export type { ChatThread }
+
 export interface AgentConfig {
   id: string
   name: string
@@ -47,6 +52,10 @@ export interface AgentConfig {
   apiKey: string
   model: string
   systemPrompt: string
+  description: string // Description for orchestrator to understand when to use this agent
+  temperature?: number
+  maxTokens?: number
+  selectedTools: string[] // Array of tool IDs this agent can use
 }
 
 interface AppState {
@@ -77,16 +86,20 @@ interface AppState {
   // Chat
   chatSessions: ChatSession[]
   currentSession: ChatSession | null
-  createChatSession: () => void
+  createChatSession: (name?: string) => Promise<void>
   selectChatSession: (sessionId: string) => void
-  addMessage: (message: Omit<Message, 'id' | 'timestamp'>) => void
-  deleteChatSession: (sessionId: string) => void
+  addMessage: (message: Omit<Message, 'id' | 'timestamp'>) => Promise<void>
+  deleteChatSession: (sessionId: string) => Promise<void>
+  loadChatThreads: () => Promise<void>
+  renameChatSession: (sessionId: string, newName: string) => Promise<void>
 
   // Agents
   orchestrator: AgentConfig | null
-  subAgents: [AgentConfig | null, AgentConfig | null, AgentConfig | null]
+  subAgents: AgentConfig[] // Dynamic array of agents
+  createSubAgent: (config: Omit<AgentConfig, 'id'>) => Promise<void>
+  updateSubAgent: (id: string, config: Partial<AgentConfig>) => Promise<void>
+  deleteSubAgent: (id: string) => Promise<void>
   updateOrchestrator: (config: Partial<AgentConfig>) => void
-  updateSubAgent: (index: 0 | 1 | 2, config: Partial<AgentConfig>) => void
   loadAgentSettings: () => Promise<void>
   exportAgentSettings: () => Promise<string>
   importAgentSettings: (jsonString: string) => Promise<void>
@@ -114,22 +127,40 @@ export const useStore = create<AppState>((set, get) => ({
       currentProject: newProject,
     }))
     
-    // Load files after setting project
+    // Load files and chat threads after setting project
     if (newProject.directoryHandle) {
       fileSystemService.setRootHandle(newProject.directoryHandle)
+      chatPersistence.setRootHandle(newProject.directoryHandle)
+      contextManager.setRootHandle(newProject.directoryHandle)
+      
+      // Initialize .agent/ folder
+      contextManager.initializeAgentFolder().catch(error => {
+        console.error('Failed to initialize agent folder:', error)
+      })
+      
       get().loadProjectFiles()
+      get().loadChatThreads()
     }
   },
   
   selectProject: async (projectId) => {
     const project = get().projects.find((p) => p.id === projectId)
     if (project) {
-      set({ currentProject: project, files: {}, currentFile: null })
+      set({ currentProject: project, files: {}, currentFile: null, chatSessions: [], currentSession: null })
       
       // Set the file system root and load files
       if (project.directoryHandle) {
         fileSystemService.setRootHandle(project.directoryHandle)
+        chatPersistence.setRootHandle(project.directoryHandle)
+        contextManager.setRootHandle(project.directoryHandle)
+        
+        // Initialize .agent/ folder
+        await contextManager.initializeAgentFolder().catch(error => {
+          console.error('Failed to initialize agent folder:', error)
+        })
+        
         await get().loadProjectFiles()
+        await get().loadChatThreads()
       }
     }
   },
@@ -606,69 +637,105 @@ export const useStore = create<AppState>((set, get) => ({
     await get().loadProjectFiles()
   },
 
-  // Chat (unchanged)
+  // Chat with persistence
   chatSessions: [],
   currentSession: null,
-  createChatSession: () => {
-    const newSession: ChatSession = {
-      id: `session-${Date.now()}`,
-      name: `Chat ${get().chatSessions.length + 1}`,
-      messages: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+  
+  loadChatThreads: async () => {
+    try {
+      const threads = await chatPersistence.loadChatThreads()
+      set({ chatSessions: threads })
+    } catch (error) {
+      console.error('Error loading chat threads:', error)
     }
-    set((state) => ({
-      chatSessions: [...state.chatSessions, newSession],
-      currentSession: newSession,
-    }))
   },
+  
+  createChatSession: async (name?: string) => {
+    try {
+      const threadName = name || `Chat ${get().chatSessions.length + 1}`
+      const newThread = await chatPersistence.createThread(threadName)
+      
+      set((state) => ({
+        chatSessions: [...state.chatSessions, newThread],
+        currentSession: newThread,
+      }))
+    } catch (error) {
+      console.error('Error creating chat session:', error)
+      throw error
+    }
+  },
+  
   selectChatSession: (sessionId) => {
     const session = get().chatSessions.find((s) => s.id === sessionId)
     if (session) {
       set({ currentSession: session })
     }
   },
-  addMessage: (message) => {
-    const currentSession = get().currentSession
+  
+  addMessage: async (message) => {
+    let currentSession = get().currentSession
+    
+    // Create a new session if none exists
     if (!currentSession) {
-      get().createChatSession()
+      await get().createChatSession()
+      currentSession = get().currentSession
+      if (!currentSession) return
     }
 
-    const newMessage: Message = {
-      ...message,
-      id: `msg-${Date.now()}-${Math.random()}`,
-      timestamp: Date.now(),
+    try {
+      // Add message to persistence
+      await chatPersistence.addMessage(currentSession.id, message)
+      
+      // Reload threads to get updated data
+      await get().loadChatThreads()
+      
+      // Re-select the current session to update the UI
+      const updatedSession = get().chatSessions.find(s => s.id === currentSession!.id)
+      if (updatedSession) {
+        set({ currentSession: updatedSession })
+      }
+    } catch (error) {
+      console.error('Error adding message:', error)
+      throw error
     }
-
-    set((state) => {
-      const session = state.currentSession
-      if (!session) return state
-
-      const updatedSession = {
-        ...session,
-        messages: [...session.messages, newMessage],
-        updatedAt: Date.now(),
-      }
-
-      return {
-        chatSessions: state.chatSessions.map((s) =>
-          s.id === session.id ? updatedSession : s
-        ),
-        currentSession: updatedSession,
-      }
-    })
   },
-  deleteChatSession: (sessionId) => {
-    set((state) => ({
-      chatSessions: state.chatSessions.filter((s) => s.id !== sessionId),
-      currentSession:
-        state.currentSession?.id === sessionId ? null : state.currentSession,
-    }))
+  
+  deleteChatSession: async (sessionId) => {
+    try {
+      await chatPersistence.deleteThread(sessionId)
+      
+      set((state) => ({
+        chatSessions: state.chatSessions.filter((s) => s.id !== sessionId),
+        currentSession:
+          state.currentSession?.id === sessionId ? null : state.currentSession,
+      }))
+    } catch (error) {
+      console.error('Error deleting chat session:', error)
+      throw error
+    }
+  },
+  
+  renameChatSession: async (sessionId, newName) => {
+    try {
+      await chatPersistence.updateThread(sessionId, { name: newName })
+      await get().loadChatThreads()
+      
+      // Update current session if it's the one being renamed
+      if (get().currentSession?.id === sessionId) {
+        const updatedSession = get().chatSessions.find(s => s.id === sessionId)
+        if (updatedSession) {
+          set({ currentSession: updatedSession })
+        }
+      }
+    } catch (error) {
+      console.error('Error renaming chat session:', error)
+      throw error
+    }
   },
 
   // Agents
   orchestrator: null,
-  subAgents: [null, null, null],
+  subAgents: [],
   
   updateOrchestrator: (config) => {
     set((state) => {
@@ -681,12 +748,14 @@ export const useStore = create<AppState>((set, get) => ({
             apiKey: '',
             model: '',
             systemPrompt: '',
+            description: 'Main orchestrator agent that coordinates tasks',
+            selectedTools: getDefaultTools(),
             ...config,
           }
       
       // Persist to storage
       settingsPersistence.saveSettings({
-        orchestrator: updatedOrchestrator as AgentSettings,
+        orchestrator: updatedOrchestrator,
       }).catch(error => {
         console.error('Failed to persist orchestrator settings:', error)
       })
@@ -695,28 +764,52 @@ export const useStore = create<AppState>((set, get) => ({
     })
   },
   
-  updateSubAgent: (index, config) => {
+  createSubAgent: async (config) => {
+    const id = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    const newAgent: AgentConfig = {
+      ...config,
+      id,
+      selectedTools: config.selectedTools || getDefaultTools(), // Use provided or default
+    }
+    
     set((state) => {
-      const newSubAgents = [...state.subAgents] as [
-        AgentConfig | null,
-        AgentConfig | null,
-        AgentConfig | null
-      ]
-      newSubAgents[index] = state.subAgents[index]
-        ? { ...state.subAgents[index]!, ...config }
-        : {
-            id: `subagent-${index}`,
-            name: `Sub Agent ${index + 1}`,
-            provider: '',
-            apiKey: '',
-            model: '',
-            systemPrompt: '',
-            ...config,
-          }
+      const newSubAgents = [...state.subAgents, newAgent]
       
       // Persist to storage
       settingsPersistence.saveSettings({
-        subAgents: newSubAgents as [AgentSettings | null, AgentSettings | null, AgentSettings | null],
+        subAgents: newSubAgents,
+      }).catch(error => {
+        console.error('Failed to persist sub-agent settings:', error)
+      })
+      
+      return { subAgents: newSubAgents }
+    })
+  },
+  
+  updateSubAgent: async (id, config) => {
+    set((state) => {
+      const newSubAgents = state.subAgents.map(agent =>
+        agent.id === id ? { ...agent, ...config } : agent
+      )
+      
+      // Persist to storage
+      settingsPersistence.saveSettings({
+        subAgents: newSubAgents,
+      }).catch(error => {
+        console.error('Failed to persist sub-agent settings:', error)
+      })
+      
+      return { subAgents: newSubAgents }
+    })
+  },
+  
+  deleteSubAgent: async (id) => {
+    set((state) => {
+      const newSubAgents = state.subAgents.filter(agent => agent.id !== id)
+      
+      // Persist to storage
+      settingsPersistence.saveSettings({
+        subAgents: newSubAgents,
       }).catch(error => {
         console.error('Failed to persist sub-agent settings:', error)
       })
@@ -728,9 +821,23 @@ export const useStore = create<AppState>((set, get) => ({
   loadAgentSettings: async () => {
     try {
       const settings = await settingsPersistence.loadSettings()
+      
+      // Migrate old settings to include selectedTools
+      const migratedOrchestrator = settings.orchestrator 
+        ? {
+            ...settings.orchestrator,
+            selectedTools: settings.orchestrator.selectedTools || getDefaultTools()
+          }
+        : null
+      
+      const migratedSubAgents = settings.subAgents.map(agent => ({
+        ...agent,
+        selectedTools: agent.selectedTools || getDefaultTools()
+      }))
+      
       set({
-        orchestrator: settings.orchestrator,
-        subAgents: settings.subAgents,
+        orchestrator: migratedOrchestrator,
+        subAgents: migratedSubAgents,
       })
     } catch (error) {
       console.error('Failed to load agent settings:', error)
@@ -762,7 +869,7 @@ export const useStore = create<AppState>((set, get) => ({
       await settingsPersistence.clearSettings()
       set({
         orchestrator: null,
-        subAgents: [null, null, null],
+        subAgents: [],
       })
     } catch (error) {
       console.error('Failed to clear settings:', error)

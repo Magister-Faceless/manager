@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Folder, File, FolderPlus, FilePlus, MoreVertical, Pencil, Trash2, ChevronRight, ChevronDown } from 'lucide-react'
+import { Folder, File, FolderPlus, FilePlus, MoreVertical, Pencil, Trash2, ChevronRight, ChevronDown, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -15,7 +15,8 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 
 export function FileExplorer() {
-  const { files, addFile, updateFile, deleteFile, openFileInTab, currentFile } = useStore()
+  const { files, addFile, updateFile, deleteFile, openFileInTab, currentFile, loadProjectFiles } = useStore()
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false)
   const [newItemName, setNewItemName] = useState('')
@@ -239,6 +240,25 @@ export function FileExplorer() {
       <div className="flex items-center justify-between p-4 border-b">
         <h2 className="font-semibold text-sm">Files</h2>
         <div className="flex gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={async () => {
+              setIsRefreshing(true)
+              try {
+                await loadProjectFiles()
+              } catch (error) {
+                console.error('Failed to refresh:', error)
+              } finally {
+                setIsRefreshing(false)
+              }
+            }}
+            title="Refresh Files"
+            disabled={isRefreshing}
+          >
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
